@@ -59,7 +59,7 @@ constant, or read from a content-addressed data contract) rather than recompilin
 Install with Foundry and add a remapping:
 
 ```sh
-forge install <owner>/create2-receipts
+forge install kalebweston100/create2-receipts
 # remappings.txt:  create2-receipts/=lib/create2-receipts/src/
 ```
 

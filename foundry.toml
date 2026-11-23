@@ -5,7 +5,7 @@ libs = ["lib"]
 test = "test"
 
 solc = "0.8.34"
-evm_version = "cancun" # EIP-1153 transient storage (witness channel), EIP-6780 semantics
+evm_version = "cancun" # EIP-6780 SELFDESTRUCT semantics
 optimizer = true
 optimizer_runs = 200
 

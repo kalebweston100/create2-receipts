@@ -31,8 +31,8 @@ Soundness has two halves:
 
 So a marker at the legitimate address means *this exact constructor accepted this
 exact claim*. Looking a fact up is one hash and one `EXTCODEHASH`, with no call into
-anything: about **9k gas** in the tests, whether the proven computation took 256 steps
-or 2,048.
+anything: about **4k gas** for an `OpcodeFreeFact` lookup in a fresh transaction
+(1.6k measured warm in `test_lookupCost`, plus 2.5k for the cold `EXTCODEHASH`).
 
 ## Usage
 
@@ -44,7 +44,7 @@ import {OpcodeFreeFact} from "create2-receipts/facts/OpcodeFreeFact.sol";
 
 // Prove once. Anyone can do this; a false claim simply reverts.
 bytes memory claim = abi.encode(module, LibBytecode.INDESTRUCTIBLE_MASK | (1 << 0x55)); // no SSTORE
-issuer.issue(OPCODE_FREE_CREATION_CODE, claim, "");
+issuer.issue(OPCODE_FREE_CREATION_CODE, claim);
 
 // Require it anywhere, forever: one hash plus one EXTCODEHASH, no external call.
 require(LibReceipt.isProven(address(issuer), OPCODE_FREE_CREATION_CODE, claim), "module not certified");
@@ -68,10 +68,9 @@ forge install kalebweston100/create2-receipts
 | File | Role |
 |---|---|
 | [`Receipt.sol`](src/Receipt.sol) | Base for receipt types: verify in the constructor, then deploy the marker |
-| [`ReceiptIssuer.sol`](src/ReceiptIssuer.sol) | Stateless, ownerless CREATE2 deployer: fixed salt, idempotent, bubbles revert reasons, witness channel, events |
+| [`ReceiptIssuer.sol`](src/ReceiptIssuer.sol) | Stateless, ownerless CREATE2 deployer: fixed salt, idempotent, bubbles revert reasons, events |
 | [`LibReceipt.sol`](src/LibReceipt.sol) | Address derivation and `isProven` lookups |
 | [`LibBytecode.sol`](src/LibBytecode.sol) | Sound static analysis of EVM bytecode, used by code facts |
-| [`IWitnessSource.sol`](src/IWitnessSource.sol) | Out-of-band hint channel for constructors |
 
 The issuer adds convenience, not trust. Receipt validity is decided entirely by each
 receipt's constructor; the tests also issue receipts straight through the keyless
@@ -85,32 +84,6 @@ every chain.
 |---|---|---|
 | [`OpcodeFreeFact`](src/facts/OpcodeFreeFact.sol) | `(address target, uint256 mask)` | No reachable instruction in `target` uses an opcode in `mask`. E.g. "this contract can never write storage, call out, emit or self-destruct" |
 | [`CloneFact`](src/facts/CloneFact.sol) | `(address clone, address implementation)` | `clone` is an EIP-1167 proxy permanently bound to an indestructible `implementation` |
-| [`HashChainFact`](src/facts/HashChainFact.sol) | `(bytes32 seed, uint256 n, bytes32 result)` | `keccak256` applied `n` times to `seed` gives `result`, built inductively |
-
-## Witnesses
-
-A receipt's address commits to its claim, so everything in the claim must be known to
-anyone looking the fact up. Some claims are cheap to check only with extra data. The
-issuer exposes that data (the **witness**) in transient storage for one `issue` call,
-and the constructor pulls it from `msg.sender` via `_witness()`.
-
-The witness is **never trusted**. A constructor must verify anything it reads from it,
-so a dishonest issuer can only make issuance fail, never make a false receipt exist
-(`test_lyingIssuerCannotForgeInductiveStep`). Fetching it is lazy, so receipt types
-that don't need one work with any CREATE2 deployer.
-
-## Inductive receipts
-
-A receipt can require that other receipts already exist. `HashChainFact` proves
-`keccak^n(seed)` in steps of 256: the step for `n` requires the receipt for `n − 256`,
-whose value arrives as the witness, then computes 256 more iterations. By induction over
-creation order, every receipt of the type is correct, so **one existence check vouches
-for an arbitrarily long computation** spread across many transactions.
-
-To find its predecessor, a receipt needs its own creation code, which
-`type(C).creationCode` cannot provide from inside `C`. During construction `CODECOPY`
-reads the running initcode (creation code followed by the encoded claim), so
-`_selfCreationCode` recovers it directly.
 
 ## Writing a receipt type
 
@@ -130,7 +103,6 @@ contract MyFact is Receipt {
   can never become false: pure computation, or properties of code that can never
   change. Never claims about balances or other mutable state, unless they are pinned to
   a point in history.
-- Verify everything read through `_witness()`.
 - Leave the derived constructor body empty. The base constructor ends creation with
   `RETURN`, so nothing after it runs.
 
@@ -194,16 +166,13 @@ time, so it has no permanent code. EIP-3541 forbids deploying code that starts w
 | keccak256 | Collision resistance bounds the address argument above |
 | The receipt type's creation code | Audited once, identical everywhere; it *is* the definition of the fact |
 
-Not trusted: the issuer, the witness, whoever pays for issuance, and anyone else.
+Not trusted: the issuer, whoever pays for issuance, and anyone else.
 
 ### Smaller notes
 
-- **Encoding.** `_selfCreationCode` assumes the canonical `abi.encode(claim)` that
-  `LibReceipt` produces. A non-canonical encoding can only make predecessor lookups miss
-  (a false negative), never a false positive.
 - **Same-transaction lookups.** An account's code reads as empty while its constructor
-  is still running. Receipts that check other receipts must not depend on ones still
-  being constructed.
+  is still running, so a fact about a contract can only be proven once that contract
+  has finished deploying.
 - **Chains.** zkSync Era derives CREATE2 addresses differently, and some chains lack the
   keyless deployer.
 
@@ -218,9 +187,16 @@ Not trusted: the issuer, the witness, whoever pays for issuance, and anyone else
 | EIP-1011 purity checker | On-chain bytecode scanning, but a one-off purity check for signature validators rather than a general system of permanent facts |
 
 To my knowledge, the combination here has not been described before: a constructor as
-the verifier, existence at a derived address as the proof, a registry-free and
-permissionless fact space, an untrusted witness channel, and inductive chaining with
-constant-cost lookup. Pointers to prior art are very welcome.
+the verifier, existence at a derived address as the proof, and a registry-free,
+permissionless fact space. Pointers to prior art are very welcome.
+
+## Future work
+
+The [`future/inductive-receipts`](https://github.com/kalebweston100/create2-receipts/tree/future/inductive-receipts)
+branch extends this with an untrusted witness channel and inductive receipts: a receipt
+that requires its predecessor's receipt, so a computation of any length can be proven
+across many transactions and still checked with one lookup. It is kept off `main`
+until it has had more review.
 
 ## Development
 

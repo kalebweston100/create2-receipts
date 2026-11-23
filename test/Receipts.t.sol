@@ -2,78 +2,47 @@
 pragma solidity ^0.8.34;
 
 import {Test} from "forge-std/Test.sol";
+import {Receipt} from "../src/Receipt.sol";
 import {ReceiptIssuer} from "../src/ReceiptIssuer.sol";
-import {IWitnessSource} from "../src/IWitnessSource.sol";
 import {LibReceipt} from "../src/LibReceipt.sol";
-import {HashChainFact} from "../src/facts/HashChainFact.sol";
+import {LibBytecode} from "../src/LibBytecode.sol";
+import {OpcodeFreeFact} from "../src/facts/OpcodeFreeFact.sol";
 
-/// @dev An issuer that serves whatever witness its caller asks for. Used to show that a
-///      dishonest issuer can make issuance fail but can never make a false receipt exist.
-contract LyingIssuer is IWitnessSource {
-    bytes private _witness;
+/// @dev Minimal receipt type used to test the core mechanism independently of any real
+///      fact type. Proves: "y == x * x".
+contract SquareFact is Receipt {
+    error WrongSquare(uint256 expected, uint256 actual);
 
-    function issue(bytes calldata creationCode, bytes calldata claim, bytes calldata fakeWitness)
-        external
-        returns (address receipt)
-    {
-        _witness = fakeWitness;
-        bytes memory code = LibReceipt.initcode(creationCode, claim);
-        assembly {
-            receipt := create2(0, add(code, 32), mload(code), 0)
-            if iszero(receipt) {
-                returndatacopy(0, 0, returndatasize())
-                revert(0, returndatasize())
-            }
-        }
+    constructor(bytes memory claim) Receipt(claim) {}
+
+    function _verify(bytes memory claim) internal pure override {
+        (uint256 x, uint256 y) = abi.decode(claim, (uint256, uint256));
+        if (x * x != y) revert WrongSquare(y, x * x);
     }
+}
 
-    function witness() external view returns (bytes memory) {
-        return _witness;
+/// @dev A pure contract, used as a realistic target for the lookup-cost measurement.
+contract Pure {
+    function double(uint256 a) external pure returns (uint256) {
+        return a * 2;
     }
 }
 
 contract ReceiptsTest is Test {
-    uint256 internal constant STEP = 256;
-
     /// @dev Runtime code of the keyless deterministic deployer (Arachnid).
     bytes internal constant KEYLESS_DEPLOYER_RUNTIME =
         hex"7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffe03601600081602082378035828234f58015156039578182fd5b8082525050506014600cf3";
 
     ReceiptIssuer internal issuer;
-    bytes internal chainType;
+    bytes internal squareType;
 
     function setUp() public {
         issuer = new ReceiptIssuer();
-        chainType = type(HashChainFact).creationCode;
+        squareType = type(SquareFact).creationCode;
     }
 
-    // ---------------------------------------------------------------------
-    // helpers
-    // ---------------------------------------------------------------------
-
-    function _hashN(bytes32 h, uint256 n) internal pure returns (bytes32) {
-        for (uint256 i; i < n; ++i) {
-            h = keccak256(abi.encode(h));
-        }
-        return h;
-    }
-
-    function _claim(bytes32 seed, uint256 n, bytes32 result) internal pure returns (bytes memory) {
-        return abi.encode(seed, n, result);
-    }
-
-    /// @dev Issues the full inductive chain for keccak^n(seed): one receipt per STEP.
-    function _issueChain(bytes32 seed, uint256 n) internal returns (bytes32 result) {
-        uint256 first = n % STEP == 0 ? STEP : n % STEP;
-        if (n < first) first = n;
-        bytes32 previous = _hashN(seed, first);
-        issuer.issue(chainType, _claim(seed, first, previous), "");
-        for (uint256 k = first + STEP; k <= n; k += STEP) {
-            bytes32 next = _hashN(previous, STEP);
-            issuer.issue(chainType, _claim(seed, k, next), abi.encode(previous));
-            previous = next;
-        }
-        return previous;
+    function _claim(uint256 x, uint256 y) internal pure returns (bytes memory) {
+        return abi.encode(x, y);
     }
 
     // ---------------------------------------------------------------------
@@ -81,80 +50,71 @@ contract ReceiptsTest is Test {
     // ---------------------------------------------------------------------
 
     function test_receiptLandsAtPredictedAddress() public {
-        bytes32 seed = keccak256("seed");
-        bytes memory claim = _claim(seed, 10, _hashN(seed, 10));
+        bytes memory claim = _claim(12, 144);
 
-        address predicted = LibReceipt.addressOf(address(issuer), chainType, claim);
+        address predicted = LibReceipt.addressOf(address(issuer), squareType, claim);
         assertEq(predicted.code.length, 0);
 
-        address receipt = issuer.issue(chainType, claim, "");
+        address receipt = issuer.issue(squareType, claim);
 
         assertEq(receipt, predicted);
         assertEq(
             receipt,
-            vm.computeCreate2Address(bytes32(0), keccak256(LibReceipt.initcode(chainType, claim)), address(issuer))
+            vm.computeCreate2Address(bytes32(0), keccak256(LibReceipt.initcode(squareType, claim)), address(issuer))
         );
         assertEq(receipt.code, hex"00", "runtime code is the 1-byte marker");
-        assertTrue(LibReceipt.isProven(address(issuer), chainType, claim));
+        assertTrue(LibReceipt.isProven(address(issuer), squareType, claim));
     }
 
     function test_trueClaimIsProven_falseClaimNeverExists() public {
-        bytes32 seed = keccak256("seed");
-        bytes32 truth = _hashN(seed, 100);
-        bytes32 lie = bytes32(uint256(truth) ^ 1);
+        issuer.issue(squareType, _claim(7, 49));
+        assertTrue(LibReceipt.isProven(address(issuer), squareType, _claim(7, 49)));
 
-        issuer.issue(chainType, _claim(seed, 100, truth), "");
-        assertTrue(LibReceipt.isProven(address(issuer), chainType, _claim(seed, 100, truth)));
-
-        vm.expectRevert(abi.encodeWithSelector(HashChainFact.WrongResult.selector, lie, truth));
-        issuer.issue(chainType, _claim(seed, 100, lie), "");
-        assertFalse(LibReceipt.isProven(address(issuer), chainType, _claim(seed, 100, lie)));
-        assertEq(LibReceipt.addressOf(address(issuer), chainType, _claim(seed, 100, lie)).code.length, 0);
+        vm.expectRevert(abi.encodeWithSelector(SquareFact.WrongSquare.selector, 50, 49));
+        issuer.issue(squareType, _claim(7, 50));
+        assertFalse(LibReceipt.isProven(address(issuer), squareType, _claim(7, 50)));
+        assertEq(LibReceipt.addressOf(address(issuer), squareType, _claim(7, 50)).code.length, 0);
     }
 
     function test_issueIsIdempotent() public {
-        bytes32 seed = keccak256("seed");
-        bytes memory claim = _claim(seed, 5, _hashN(seed, 5));
+        bytes memory claim = _claim(5, 25);
 
         vm.recordLogs();
-        address first = issuer.issue(chainType, claim, "");
-        address second = issuer.issue(chainType, claim, "");
+        address first = issuer.issue(squareType, claim);
+        address second = issuer.issue(squareType, claim);
 
         assertEq(first, second);
         assertEq(vm.getRecordedLogs().length, 1, "only the first issuance emits");
     }
 
     function test_issueEmitsEvent() public {
-        bytes32 seed = keccak256("seed");
-        bytes memory claim = _claim(seed, 3, _hashN(seed, 3));
-        address predicted = LibReceipt.addressOf(address(issuer), chainType, claim);
+        bytes memory claim = _claim(3, 9);
+        address predicted = LibReceipt.addressOf(address(issuer), squareType, claim);
 
         vm.expectEmit(true, true, false, true, address(issuer));
-        emit ReceiptIssuer.ReceiptIssued(predicted, keccak256(chainType), claim);
-        issuer.issue(chainType, claim, "");
+        emit ReceiptIssuer.ReceiptIssued(predicted, keccak256(squareType), claim);
+        issuer.issue(squareType, claim);
     }
 
     function test_receiptsAreScopedToTheirIssuer() public {
-        bytes32 seed = keccak256("seed");
-        bytes memory claim = _claim(seed, 7, _hashN(seed, 7));
+        bytes memory claim = _claim(4, 16);
         ReceiptIssuer other = new ReceiptIssuer();
 
-        issuer.issue(chainType, claim, "");
+        issuer.issue(squareType, claim);
 
-        assertTrue(LibReceipt.isProven(address(issuer), chainType, claim));
-        assertFalse(LibReceipt.isProven(address(other), chainType, claim));
+        assertTrue(LibReceipt.isProven(address(issuer), squareType, claim));
+        assertFalse(LibReceipt.isProven(address(other), squareType, claim));
     }
 
     /// @dev Deploying the receipt type directly with `new` puts it at a CREATE address
     ///      unrelated to the fact's address, so it proves nothing about lookups.
     function test_deployingOutsideTheIssuerDoesNotCount() public {
-        bytes32 seed = keccak256("seed");
-        bytes memory claim = _claim(seed, 4, _hashN(seed, 4));
+        bytes memory claim = _claim(2, 4);
 
-        address direct = address(new HashChainFact(claim));
+        address direct = address(new SquareFact(claim));
 
         assertEq(direct.code, hex"00");
-        assertFalse(LibReceipt.isProven(address(issuer), chainType, claim));
+        assertFalse(LibReceipt.isProven(address(issuer), squareType, claim));
     }
 
     /// @dev Arbitrary code at an address is never mistaken for a receipt.
@@ -172,90 +132,20 @@ contract ReceiptsTest is Test {
         assertTrue(LibReceipt.isReceipt(someone));
     }
 
-    // ---------------------------------------------------------------------
-    // witness channel
-    // ---------------------------------------------------------------------
-
-    function test_witnessIsNotPartOfTheAddress() public {
-        bytes32 seed = keccak256("seed");
-        bytes memory claim = _claim(seed, 9, _hashN(seed, 9));
-        address predicted = LibReceipt.addressOf(address(issuer), chainType, claim);
-
-        // The base case ignores the witness, so any witness yields the same receipt.
-        assertEq(issuer.issue(chainType, claim, hex"deadbeef"), predicted);
-    }
-
-    function test_witnessIsClearedAfterIssue() public {
-        bytes32 seed = keccak256("seed");
-        issuer.issue(chainType, _claim(seed, 2, _hashN(seed, 2)), hex"0102030405");
-        assertEq(issuer.witness().length, 0);
-    }
-
-    // ---------------------------------------------------------------------
-    // induction
-    // ---------------------------------------------------------------------
-
-    function test_inductiveChainProvesLongComputation() public {
-        bytes32 seed = keccak256("seed");
-        uint256 n = STEP * 5 + 17;
-
-        bytes32 result = _issueChain(seed, n);
-
-        assertEq(result, _hashN(seed, n));
-        assertTrue(LibReceipt.isProven(address(issuer), chainType, _claim(seed, n, result)));
-    }
-
-    function test_inductiveStepRequiresPredecessor() public {
-        bytes32 seed = keccak256("seed");
-        bytes32 previous = _hashN(seed, STEP);
-        bytes32 next = _hashN(previous, STEP);
-
-        // Skip issuing the base receipt (seed, STEP, previous).
-        vm.expectRevert(abi.encodeWithSelector(HashChainFact.MissingPredecessor.selector, seed, STEP, previous));
-        issuer.issue(chainType, _claim(seed, 2 * STEP, next), abi.encode(previous));
-    }
-
-    function test_inductiveStepRejectsWrongWitness() public {
-        bytes32 seed = keccak256("seed");
-        bytes32 previous = _issueChain(seed, STEP);
-        bytes32 next = _hashN(previous, STEP);
-        bytes32 fake = keccak256("fake");
-
-        vm.expectRevert(abi.encodeWithSelector(HashChainFact.MissingPredecessor.selector, seed, STEP, fake));
-        issuer.issue(chainType, _claim(seed, 2 * STEP, next), abi.encode(fake));
-    }
-
-    /// @dev A dishonest issuer controls the witness completely, yet cannot prove a false
-    ///      inductive claim: the predecessor it points at was never proven.
-    function test_lyingIssuerCannotForgeInductiveStep() public {
-        LyingIssuer liar = new LyingIssuer();
-        bytes32 seed = keccak256("seed");
-        bytes32 fakePrevious = keccak256("never computed");
-        bytes32 fakeResult = _hashN(fakePrevious, STEP);
-
-        vm.expectRevert(abi.encodeWithSelector(HashChainFact.MissingPredecessor.selector, seed, STEP, fakePrevious));
-        liar.issue(chainType, _claim(seed, 2 * STEP, fakeResult), abi.encode(fakePrevious));
-
-        assertFalse(LibReceipt.isProven(address(liar), chainType, _claim(seed, 2 * STEP, fakeResult)));
-    }
-
-    function test_lookupCostIsConstantInComputationLength() public {
-        bytes32 seed = keccak256("seed");
-        uint256 n = STEP * 8;
-        bytes32 result = _issueChain(seed, n);
-        bytes memory longClaim = _claim(seed, n, result);
-        bytes memory shortClaim = _claim(seed, STEP, _hashN(seed, STEP));
+    /// @dev A lookup is one hash of the initcode plus one EXTCODEHASH, with no external
+    ///      call. Measured for a real receipt type so the README figure is honest.
+    function test_lookupCost() public {
+        address target = address(new Pure());
+        bytes memory opcodeFreeType = type(OpcodeFreeFact).creationCode;
+        bytes memory claim = abi.encode(target, LibBytecode.INDESTRUCTIBLE_MASK);
+        issuer.issue(opcodeFreeType, claim);
 
         uint256 g0 = gasleft();
-        bool longOk = LibReceipt.isProven(address(issuer), chainType, longClaim);
-        uint256 g1 = gasleft();
-        bool shortOk = LibReceipt.isProven(address(issuer), chainType, shortClaim);
-        uint256 g2 = gasleft();
+        bool ok = LibReceipt.isProven(address(issuer), opcodeFreeType, claim);
+        uint256 used = g0 - gasleft();
 
-        assertTrue(longOk && shortOk);
-        emit log_named_uint("lookup gas, 2048 iterations", g0 - g1);
-        emit log_named_uint("lookup gas, 256 iterations", g1 - g2);
-        assertApproxEqAbs(g0 - g1, g1 - g2, 3000, "lookup cost does not grow with n");
+        assertTrue(ok);
+        emit log_named_uint("isProven gas, OpcodeFreeFact", used);
     }
 
     // ---------------------------------------------------------------------
@@ -282,43 +172,39 @@ contract ReceiptsTest is Test {
         assertGt(canonical.code.length, 0);
     }
 
-    /// @dev Receipts also work with the keyless deployer itself as the issuer (no witness
-    ///      channel, and rejections are silent), which shows the issuer adds convenience,
-    ///      not trust.
-    function test_keylessDeployerCanIssueBaseCaseReceipts() public {
+    /// @dev Receipts also work with the keyless deployer itself as the issuer (rejections
+    ///      are just silent), which shows the issuer adds convenience, not trust.
+    function test_keylessDeployerCanIssueReceipts() public {
         address deployer = _keylessDeployer();
-        bytes32 seed = keccak256("seed");
-        bytes memory truth = _claim(seed, 12, _hashN(seed, 12));
-        bytes memory lie = _claim(seed, 12, bytes32(0));
+        bytes memory truth = _claim(11, 121);
+        bytes memory lie = _claim(11, 120);
 
-        (bool ok,) = deployer.call(abi.encodePacked(bytes32(0), LibReceipt.initcode(chainType, truth)));
+        (bool ok,) = deployer.call(abi.encodePacked(bytes32(0), LibReceipt.initcode(squareType, truth)));
         assertTrue(ok);
-        assertTrue(LibReceipt.isProven(deployer, chainType, truth));
+        assertTrue(LibReceipt.isProven(deployer, squareType, truth));
 
-        (ok,) = deployer.call(abi.encodePacked(bytes32(0), LibReceipt.initcode(chainType, lie)));
+        (ok,) = deployer.call(abi.encodePacked(bytes32(0), LibReceipt.initcode(squareType, lie)));
         assertFalse(ok);
-        assertFalse(LibReceipt.isProven(deployer, chainType, lie));
+        assertFalse(LibReceipt.isProven(deployer, squareType, lie));
     }
 
     // ---------------------------------------------------------------------
     // fuzz
     // ---------------------------------------------------------------------
 
-    function testFuzz_trueClaimsAreProvable(bytes32 seed, uint256 n) public {
-        n = bound(n, 0, STEP);
-        bytes memory claim = _claim(seed, n, _hashN(seed, n));
-        issuer.issue(chainType, claim, "");
-        assertTrue(LibReceipt.isProven(address(issuer), chainType, claim));
+    function testFuzz_trueClaimsAreProvable(uint128 x) public {
+        bytes memory claim = _claim(x, uint256(x) * x);
+        issuer.issue(squareType, claim);
+        assertTrue(LibReceipt.isProven(address(issuer), squareType, claim));
     }
 
-    function testFuzz_falseClaimsAreNeverProven(bytes32 seed, uint256 n, bytes32 wrong) public {
-        n = bound(n, 0, STEP);
-        bytes32 truth = _hashN(seed, n);
+    function testFuzz_falseClaimsAreNeverProven(uint128 x, uint256 wrong) public {
+        uint256 truth = uint256(x) * x;
         vm.assume(wrong != truth);
-        bytes memory claim = _claim(seed, n, wrong);
+        bytes memory claim = _claim(x, wrong);
 
-        vm.expectRevert(abi.encodeWithSelector(HashChainFact.WrongResult.selector, wrong, truth));
-        issuer.issue(chainType, claim, "");
-        assertFalse(LibReceipt.isProven(address(issuer), chainType, claim));
+        vm.expectRevert(abi.encodeWithSelector(SquareFact.WrongSquare.selector, wrong, truth));
+        issuer.issue(squareType, claim);
+        assertFalse(LibReceipt.isProven(address(issuer), squareType, claim));
     }
 }

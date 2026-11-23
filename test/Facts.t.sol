@@ -64,7 +64,7 @@ contract FactsTest is Test {
         bytes memory claim = abi.encode(adder, PURE_MASK);
 
         uint256 g = gasleft();
-        issuer.issue(opcodeFreeType, claim, "");
+        issuer.issue(opcodeFreeType, claim);
         emit log_named_uint("issue gas, pure-module certificate", g - gasleft());
 
         assertTrue(LibReceipt.isProven(address(issuer), opcodeFreeType, claim));
@@ -75,7 +75,7 @@ contract FactsTest is Test {
         bytes memory claim = abi.encode(counter, PURE_MASK);
 
         vm.expectPartialRevert(OpcodeFreeFact.ForbiddenOpcode.selector);
-        issuer.issue(opcodeFreeType, claim, "");
+        issuer.issue(opcodeFreeType, claim);
         assertFalse(LibReceipt.isProven(address(issuer), opcodeFreeType, claim));
     }
 
@@ -84,19 +84,19 @@ contract FactsTest is Test {
         vm.etch(target, hex"6000f4"); // PUSH1 0, DELEGATECALL
 
         vm.expectRevert(abi.encodeWithSelector(OpcodeFreeFact.ForbiddenOpcode.selector, target, 2, uint8(0xf4)));
-        issuer.issue(opcodeFreeType, abi.encode(target, LibBytecode.INDESTRUCTIBLE_MASK), "");
+        issuer.issue(opcodeFreeType, abi.encode(target, LibBytecode.INDESTRUCTIBLE_MASK));
     }
 
     function test_opcodeFree_requiresEternalMask() public {
         address adder = address(new Adder());
         vm.expectRevert(OpcodeFreeFact.NotEternal.selector);
-        issuer.issue(opcodeFreeType, abi.encode(adder, uint256(1 << 0x55)), "");
+        issuer.issue(opcodeFreeType, abi.encode(adder, uint256(1 << 0x55)));
     }
 
     function test_opcodeFree_rejectsAccountsWithoutCode() public {
         address eoa = makeAddr("eoa");
         vm.expectRevert(abi.encodeWithSelector(OpcodeFreeFact.NotAnalyzable.selector, eoa));
-        issuer.issue(opcodeFreeType, abi.encode(eoa, PURE_MASK), "");
+        issuer.issue(opcodeFreeType, abi.encode(eoa, PURE_MASK));
     }
 
     function test_opcodeFree_rejectsEip7702Accounts() public {
@@ -104,7 +104,7 @@ contract FactsTest is Test {
         vm.etch(delegated, abi.encodePacked(hex"ef0100", address(new Adder())));
 
         vm.expectRevert(abi.encodeWithSelector(OpcodeFreeFact.NotAnalyzable.selector, delegated));
-        issuer.issue(opcodeFreeType, abi.encode(delegated, PURE_MASK), "");
+        issuer.issue(opcodeFreeType, abi.encode(delegated, PURE_MASK));
     }
 
     function test_opcodeFree_ignoresDeadCode() public {
@@ -112,7 +112,7 @@ contract FactsTest is Test {
         vm.etch(target, hex"00fff4f2"); // STOP, then unreachable forbidden bytes
         bytes memory claim = abi.encode(target, LibBytecode.INDESTRUCTIBLE_MASK);
 
-        issuer.issue(opcodeFreeType, claim, "");
+        issuer.issue(opcodeFreeType, claim);
         assertTrue(LibReceipt.isProven(address(issuer), opcodeFreeType, claim));
     }
 
@@ -125,7 +125,7 @@ contract FactsTest is Test {
         address clone = _clone(implementation);
         bytes memory claim = abi.encode(clone, implementation);
 
-        issuer.issue(cloneType, claim, "");
+        issuer.issue(cloneType, claim);
 
         assertTrue(LibReceipt.isProven(address(issuer), cloneType, claim));
         assertEq(Adder(clone).add(2, 3), 5);
@@ -137,7 +137,7 @@ contract FactsTest is Test {
         address clone = _clone(implementation);
 
         vm.expectRevert(abi.encodeWithSelector(CloneFact.NotAClone.selector, clone, other));
-        issuer.issue(cloneType, abi.encode(clone, other), "");
+        issuer.issue(cloneType, abi.encode(clone, other));
     }
 
     function test_clone_rejectsNonClone() public {
@@ -145,7 +145,7 @@ contract FactsTest is Test {
         address notAClone = address(new Adder());
 
         vm.expectRevert(abi.encodeWithSelector(CloneFact.NotAClone.selector, notAClone, implementation));
-        issuer.issue(cloneType, abi.encode(notAClone, implementation), "");
+        issuer.issue(cloneType, abi.encode(notAClone, implementation));
     }
 
     /// @dev An implementation that can SELFDESTRUCT could destroy a same-transaction clone,
@@ -157,6 +157,6 @@ contract FactsTest is Test {
         address clone = _clone(implementation);
 
         vm.expectRevert(abi.encodeWithSelector(CloneFact.ImplementationNotEternal.selector, implementation, 1));
-        issuer.issue(cloneType, abi.encode(clone, implementation), "");
+        issuer.issue(cloneType, abi.encode(clone, implementation));
     }
 }
